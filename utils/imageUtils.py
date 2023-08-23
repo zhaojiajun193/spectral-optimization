@@ -27,6 +27,11 @@ class ImageUtils:
         return image
 
     @staticmethod
+    def load_color_image(path):
+        image = cv2.imread(path, cv2.IMREAD_COLOR)
+        return image
+
+    @staticmethod
     def transpose_hsi(hsi):
         hsi = copy.deepcopy(hsi)
         return hsi.transpose(1, 2, 0)
@@ -38,6 +43,10 @@ class ImageUtils:
     @staticmethod
     def cvt_color_bgr_2_rgb(image):
         return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+    @staticmethod
+    def cvt_color_2_grayscale(image):
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
     @staticmethod
     def save_rgb_image(save_path, image):
