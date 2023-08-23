@@ -8,7 +8,18 @@ import numpy as np
 from utils import ImageUtils
 import cv2
 from time import sleep
-
+#代码思路，仿照CameraOperation类实现
+#init实现
+#openDevice
+#closeDevice
+#get_parameter
+#set_parameter
+#get_image
+#save_image 
+#start_grabing
+#close_grabing
+#存储图像和发送图像写到start_grabing启动的线程中去
+#get_one_image 取一张图像
 class HikCamera(baseCamera):
 
     def __init__(self, st_device_list, userDefinedName):
