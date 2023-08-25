@@ -5,9 +5,11 @@ import sys
 import msvcrt
 from ctypes import *
 import numpy as np
-from utils import ImageUtils
+from utils import ImageUtils, ThreadUtils
 import cv2
 from time import sleep
+import threading
+import random
 #代码思路，仿照CameraOperation类实现
 #init实现
 #openDevice
@@ -19,158 +21,266 @@ from time import sleep
 #start_grabing
 #close_grabing
 #存储图像和发送图像写到start_grabing启动的线程中去
-#get_one_image 取一张图像
-class HikCamera(baseCamera):
+#get_one_image 取一张图像aaa
+class HikCamera():
 
-    def __init__(self, st_device_list, userDefinedName):
-        deviceList = MV_CC_DEVICE_INFO_LIST()
-        tlayerType = MV_GIGE_DEVICE | MV_USB_DEVICE
-        ret = MvCamera.MV_CC_EnumDevices(tlayerType, deviceList)
-        if ret != 0:
-            logger.error("enum devices fail! ret[0x%x]" % ret)
-            sys.exit()
-        if deviceList.nDeviceNum == 0:
-            logger.debug("find no device!")
-            sys.exit()
-        logger.debug("Find %d devices!" % deviceList.nDeviceNum)
-        if deviceList.nDeviceNum > 1:
-            logger.error("Find more than one device, please just connect one device")
-            sys.exit()
-        mvcc_dev_info = cast(deviceList.pDeviceInfo[0], POINTER(MV_CC_DEVICE_INFO)).contents
-        if mvcc_dev_info.nTLayerType == MV_GIGE_DEVICE:
-            logger.debug("\ngige device: [%d]" % 0)
-            strModeName = ""
-            for per in mvcc_dev_info.SpecialInfo.stGigEInfo.chModelName:
-                strModeName = strModeName + chr(per)
-            logger.debug("device model name: %s" % strModeName)
+    def __init__(self, obj_cam, st_device_list, userDefinedName, b_open_device=False, b_start_grabbing=False,
+                h_thread_handle=None,
+                b_thread_closed=False, st_frame_info=None, b_exit=False, b_save_bmp=False, b_save_jpg=False,
+                buf_save_image=None,
+                n_save_image_size=0, n_win_gui_id=0, frame_rate=0, exposure_time=0, gain=0):
+        self.obj_cam = obj_cam
+        self.st_device_list = st_device_list
+        self.userDefinedName = userDefinedName
+        self.b_open_device = b_open_device
+        self.b_start_grabbing = b_start_grabbing
+        self.b_thread_closed = b_thread_closed
+        self.st_frame_info = st_frame_info
+        self.b_exit = b_exit
+        self.b_save_bmp = b_save_bmp
+        self.b_save_jpg = b_save_jpg
+        self.buf_grab_image = None
+        self.buf_grab_image_size = 0
+        self.buf_save_image = buf_save_image
+        self.n_save_image_size = n_save_image_size
+        self.h_thread_handle = h_thread_handle
+        self.b_thread_closed
+        self.frame_rate = frame_rate
+        self.exposure_time = exposure_time
+        self.gain = gain
+        self.buf_lock = threading.Lock()
 
-            nip1 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0xff000000) >> 24)
-            nip2 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x00ff0000) >> 16)
-            nip3 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x0000ff00) >> 8)
-            nip4 = (mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x000000ff)
-            logger.debug("current ip: %d.%d.%d.%d\n" % (nip1, nip2, nip3, nip4))
-        elif mvcc_dev_info.nTLayerType == MV_USB_DEVICE:
-            logger.debug("\nu3v device: [%d]" % 0)
-            strModeName = ""
-            for per in mvcc_dev_info.SpecialInfo.stUsb3VInfo.chModelName:
-                if per == 0:
-                    break
-                strModeName = strModeName + chr(per)
-            logger.debug("device model name: %s" % strModeName)
+    def Open_device(self):
+        if not self.b_open_device:
+            for i in range(0, self.st_device_list.nDeviceNum):
+                mvcc_dev_info = cast(self.st_device_list.pDeviceInfo[i], POINTER(MV_CC_DEVICE_INFO)).contents
+                strUserDefinedName = ""
+                if mvcc_dev_info.nTLayerType == MV_GIGE_DEVICE:
+                    print ("\ngige device: [%d]" % i)
+                    for per in mvcc_dev_info.SpecialInfo.chUserDefinedName:
+                        strUserDefinedName = strUserDefinedName + chr(per)
+                    logger.debug("user defined name: %s", strUserDefinedName)
+                elif mvcc_dev_info.nTLayerType == MV_USB_DEVICE:
+                    print ("\nu3v device: [%d]" % i)
+                    for per in mvcc_dev_info.SpecialInfo.stUsb3VInfo.chUserDefinedName:
+                        if per == 0:
+                            break
+                        strUserDefinedName = strUserDefinedName + chr(per)
+                    logger.debug("user defined name: %s" % strUserDefinedName)
+                if strUserDefinedName == self.userDefinedName:
+                    self.obj_cam = MvCamera()
+                    stDeviceList = cast(self.st_device_list.pDeviceInfo[int(i)],
+                                POINTER(MV_CC_DEVICE_INFO)).contents
+                    ret = self.obj_cam.MV_CC_CreateHandle(stDeviceList)
+                    if ret != 0:
+                        self.obj_cam.MV_CC_DestroyHandle()
+                        return ret
+                    ret = self.obj_cam.MV_CC_OpenDevice()
+                    if ret != 0:
+                        return ret
+                    print("open device successfully!")
+                    self.b_open_device = True
+                    self.b_thread_closed = False
+                    if stDeviceList.nTLayerType == MV_GIGE_DEVICE:
+                        nPacketSize = self.obj_cam.MV_CC_GetOptimalPacketSize()
+                        if int(nPacketSize) > 0:
+                            ret = self.obj_cam.MV_CC_SetIntValue("GevSCPSPacketSize", nPacketSize)
+                            if ret != 0:
+                                print("warning: set packet size fail! ret[0x%x]" % ret)
+                        else:
+                            print("warning: set packet size fail! ret[0x%x]" % nPacketSize)
 
-            strSerialNumber = ""
-            for per in mvcc_dev_info.SpecialInfo.stUsb3VInfo.chSerialNumber:
-                if per == 0:
-                    break
-                strSerialNumber = strSerialNumber + chr(per)
-            logger.debug("user serial number: %s" % strSerialNumber)
-        self.cam = MvCamera()
-        stDeviceList = cast(deviceList.pDeviceInfo[0], POINTER(MV_CC_DEVICE_INFO)).contents
-        ret = self.cam.MV_CC_CreateHandle(stDeviceList)
-        if ret != 0:
-            logger.error("create handle fail! ret[0x%x]" % ret)
-            sys.exit()
-        ret = self.cam.MV_CC_OpenDevice(MV_ACCESS_Exclusive, 0)
-        if ret != 0:
-            logger.error("open device fail! ret[0x%x]" % ret)
-            sys.exit()
-        # ch:探测网络最佳包大小(只对GigE相机有效) | en:Detection network optimal package size(It only works for the GigE camera)
-        if stDeviceList.nTLayerType == MV_GIGE_DEVICE:
-            nPacketSize = self.cam.MV_CC_GetOptimalPacketSize()
-            if int(nPacketSize) > 0:
-                ret = self.cam.MV_CC_SetIntValue("GevSCPSPacketSize",nPacketSize)
-                if ret != 0:
-                    logger.error("Warning: Set Packet Size fail! ret[0x%x]" % ret)
-            else:
-                logger.error("Warning: Get Packet Size fail! ret[0x%x]" % nPacketSize)
+                    stBool = c_bool(False)
+                    ret = self.obj_cam.MV_CC_GetBoolValue("AcquisitionFrameRateEnable", stBool)
+                    if ret != 0:
+                        print("get acquisition frame rate enable fail! ret[0x%x]" % ret)
 
-        stBool = c_bool(False)
-        ret = self.cam.MV_CC_GetBoolValue("AcquisitionFrameRateEnable", stBool)
-        if ret != 0:
-            logger.error("get AcquisitionFrameRateEnable fail! ret[0x%x]" % ret)
+                    # ch:设置触发模式为off | en:Set trigger mode as off
+                    ret = self.obj_cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
+                    if ret != 0:
+                        print("set trigger mode fail! ret[0x%x]" % ret)
+                    return MV_OK
+            return MV_E_CALLORDER
 
-        ret = self.cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
-        if ret != 0:
-            logger.error("set trigger mode fail! ret[0x%x]" % ret)
-            sys.exit()
-
-        ret = self.cam.MV_CC_StartGrabbing()
-        if ret != 0:
-            logger.error("start grabbing fail! ret[0x%x]" % ret)
-            sys.exit()
-        logger.debug("海康相机初始化成功")
-
-    def get_one_image(self):
-        stOutFrame = MV_FRAME_OUT()
-        memset(byref(stOutFrame), 0, sizeof(stOutFrame))
-        ret = self.cam.MV_CC_GetImageBuffer(stOutFrame, 1000)
-        if None != stOutFrame.pBufAddr and 0 == ret:
-            logger.debug("get one frame: Width[%d], Height[%d], nFrameNum[%d]"  % (stOutFrame.stFrameInfo.nWidth, stOutFrame.stFrameInfo.nHeight, stOutFrame.stFrameInfo.nFrameNum))
-            pData = (c_ubyte * stOutFrame.stFrameInfo.nWidth * stOutFrame.stFrameInfo.nHeight)()
-            cdll.msvcrt.memcpy(byref(pData), stOutFrame.pBufAddr,stOutFrame.stFrameInfo.nWidth * stOutFrame.stFrameInfo.nHeight)
-            data = np.frombuffer(pData, count=int(stOutFrame.stFrameInfo.nWidth * stOutFrame.stFrameInfo.nHeight),dtype=np.uint8)
-            image = data.reshape((stOutFrame.stFrameInfo.nHeight, stOutFrame.stFrameInfo.nWidth))
-            nRet = self.cam.MV_CC_FreeImageBuffer(stOutFrame)
-            return image
-        else:
-            logger.error("no data[0x%x]" % ret)
-        nRet = self.cam.MV_CC_FreeImageBuffer(stOutFrame)
-        return None
-
-    def get_exposure_time(self):
-        stFloatParam_ExposureTime = MVCC_FLOATVALUE()
-        ret = self.cam.MV_CC_GetFloatValue("ExposureTime", stFloatParam_ExposureTime)
-        if ret != 0:
-            logger.error("get exposureTime fail! ret[0x%x]" % ret)
-            return False, 0
-        return True, stFloatParam_ExposureTime.fCurValue
-    
-    def set_exposure_time(self, exposure_time):
-        ret = self.cam.MV_CC_SetFloatValue("ExposureTime", exposure_time)
-        if ret != 0:
-            logger.error("set exposureTime fail! ret[0x%x]" % ret)
-            return False
-        return True
-
-    def stop_grabing(self):
-        ret = self.cam.MV_CC_StopGrabbing()
-        if ret != 0:
-            logger.error("stop grabbing fail! ret[0x%x]" % ret)
-            sys.exit(1)
-
-    def close_camera(self):
-        ret = self.cam.MV_CC_CloseDevice()
-        if ret != 0:
-            logger.error("close deivce fail! ret[0x%x]" % ret)
-            sys.exit()
-        logger.debug("close device success!")
-        ret = self.cam.MV_CC_DestroyHandle()
-        if ret != 0:
-            logger.error("destroy handle fail! ret[0x%x]" % ret)
-            sys.exit()
-        logger.debug("destroy handle success!")
-
-    def auto_exposure_adjustment(self, mean_min, mean_max):
-        while True:
+    def Start_grabing(self):
+        if not self.b_start_grabbing and self.b_open_device:
+            self.b_exit = False
+            ret = self.obj_cam.MV_CC_StartGrabbing()
+            if ret != 0:
+                return ret
+            self.b_start_grabbing = True
+            logger.debug(self.userDefinedName + "start grabbing successfully!")
             try:
-                image = self.get_one_image()
-                # cv2.imshow("test", image)
-                image_mean = ImageUtils.get_monoimage_histmean(image)
-                if image_mean >= 50 and image_mean <= 100:
-                    logger.debug(image_mean)
-                    break
-                else:
-                    gain = 75 / image_mean
-                    logger.debug(gain)
-                    if gain > 10:
-                        gain = 10
-                    ret, exposure_time = self.get_exposure_time()
-                    want_exposure_time = gain*exposure_time
-                    logger.debug(want_exposure_time)
-                    if want_exposure_time > 1000000:
-                        want_exposure_time = 1000000
-                    ret = self.set_exposure_time(want_exposure_time)
-                    sleep(1)
-            except Exception as e:
-                logger.debug(e)
-        logger.info("adjust success")
+                thread_id = random.randint(1, 10000)
+                self.h_thread_handle = threading.Thread(target=HikCamera.Work_thread, args=(self,))
+                self.h_thread_handle.start()
+                self.b_thread_closed = True
+                return MV_OK
+            finally:
+                pass
+        return MV_E_CALLORDER
+
+    def Stop_grabing(self):
+        if self.b_start_grabbing and self.b_open_device:
+            # 退出线程
+            if self.b_thread_closed:
+                ThreadUtils.Stop_thread(self.h_thread_handle)
+                self.b_thread_closed = False
+                ret = self.obj_cam.MV_CC_StopGrabbing()
+                if ret != 0:
+                    return ret
+                print("stop grabbing successfully!")
+                self.b_start_grabbing = False
+                self.b_exit = True
+                return MV_OK
+            else:
+                return MV_E_CALLORDER
+
+    def Work_thread(self):
+        stFrameInfo = MV_FRAME_OUT_INFO_EX()
+        img_buff = None
+        numArray = None
+
+        stPayloadSize = MVCC_INTVALUE_EX()
+        ret_temp = self.obj_cam.MV_CC_GetIntValueEx("PayloadSize", stPayloadSize)
+        if ret_temp != MV_OK:
+            return
+        NeedBufSize = int(stPayloadSize.nCurValue)
+        while True:
+            if self.buf_grab_image_size < NeedBufSize:
+                self.buf_grab_image = (c_ubyte * NeedBufSize)()
+                self.buf_grab_image_size = NeedBufSize
+
+            ret = self.obj_cam.MV_CC_GetOneFrameTimeout(self.buf_grab_image, self.buf_grab_image_size, stFrameInfo)
+
+            # ret = self.obj_cam.MV_CC_GetImageBuffer(stOutFrame, 1000)
+            if 0 == ret:
+                # 拷贝图像和图像信息
+                if self.buf_save_image is None:
+                    self.buf_save_image = (c_ubyte * stFrameInfo.nFrameLen)()
+                self.st_frame_info = stFrameInfo
+                # logger.debug("get one frame: Width[%d], Height[%d], nFrameNum[%d]"
+                #       % (self.st_frame_info.nWidth, self.st_frame_info.nHeight, self.st_frame_info.nFrameNum))
+                # 获取缓存锁
+                self.buf_lock.acquire()
+                cdll.msvcrt.memcpy(byref(self.buf_save_image), self.buf_grab_image, self.st_frame_info.nFrameLen)
+                self.buf_lock.release()
+
+                # logger.debug("get one frame: Width[%d], Height[%d], nFrameNum[%d]"
+                #       % (self.st_frame_info.nWidth, self.st_frame_info.nHeight, self.st_frame_info.nFrameNum))
+                # 释放缓存
+                # self.obj_cam.MV_CC_FreeImageBuffer(stOutFrame)
+            else:
+                print("no data, ret = " + To_hex_str(ret))
+                continue
+
+            # 是否退出
+            if self.b_exit:
+                if img_buff is not None:
+                    del img_buff
+                if self.buf_save_image is not None:
+                    del self.buf_save_image
+                break
+
+    def get_image(self):
+        if 0 == self.buf_save_image:
+            return
+        self.buf_lock.acquire()
+        if self.st_frame_info is None:
+            self.buf_lock.release()
+            logger.debug("st frame info is None")
+            return None, MV_E_CALLORDER
+        else:
+            data = np.frombuffer(self.buf_save_image, count=int(self.st_frame_info.nWidth * self.st_frame_info.nHeight),dtype=np.uint8)
+            image = data.reshape(self.st_frame_info.nHeight, self.st_frame_info.nWidth, -1)
+            self.buf_lock.release()
+        return image, MV_OK
+
+    def Close_device(self):
+        if self.b_open_device:
+            # 退出线程
+            if self.b_thread_closed:
+                Stop_thread(self.h_thread_handle)
+                self.b_thread_closed = False
+            ret = self.obj_cam.MV_CC_CloseDevice()
+            if ret != 0:
+                return ret
+
+        # ch:销毁句柄 | Destroy handle
+        self.obj_cam.MV_CC_DestroyHandle()
+        self.b_open_device = False
+        self.b_start_grabbing = False
+        self.b_exit = True
+        print("close device successfully!")
+        return MV_OK
+
+    def Set_exposureTime(self, exposure_time):
+        if self.b_open_device:
+            ret = self.obj_cam.MV_CC_SetFloatValue("ExposureTime", float(exposure_time))
+            if ret != 0:
+                logger.debug("set Exposure Time fail! ret[0x%x]" % ret)
+                return ret
+            return MV_OK
+
+    def Get_exposureTime(self):
+        if self.b_open_device:
+            stFloatParam_exposureTime = MVCC_FLOATVALUE()
+            memset(byref(stFloatParam_exposureTime), 0, sizeof(MVCC_FLOATVALUE))
+            ret = self.obj_cam.MV_CC_GetFloatValue("ExposureTime", stFloatParam_exposureTime)
+            if ret != 0:
+                logger.debug("get exposure time fail! ret[0x%x]" % ret)
+                return None, ret
+            #stFloatParam_exposureTime.fCurValue的类型是float
+            return stFloatParam_exposureTime.fCurValue, MV_OK
+
+    def Set_gain(self, gain):
+        if self.b_open_device:
+            ret = self.obj_cam.MV_CC_SetFloatValue("Gain", float(gain))
+            if ret != 0:
+                logger.debug("set gain fail! ret[0x%x]" % ret)
+                return ret
+            return MV_OK
+
+    def Get_gain(self):
+        if self.b_open_device:
+            stFloatParam_gain = MVCC_FLOATVALUE()
+            memset(byref(stFloatParam_gain), 0, sizeof(MVCC_FLOATVALUE))
+            ret = self.obj_cam.MV_CC_GetFloatValue("Gain", stFloatParam_gain)
+            if ret != 0:
+                logger.debug("get gain fail! ret[0x%x]" % ret)
+                return None, ret
+            return stFloatParam_gain.fCurValue, MV_OK
+
+    def Set_frameRate(self, frame_rate):
+        if self.b_open_device:
+            ret = self.obj_cam.MV_CC_SetFloatValue("AcquisitionFrameRate", float(frame_rate))
+            if ret != 0:
+                logger.debug("set AcquisitionFrameRate fail! ret[0x%x]" % ret)
+                return ret
+            return MV_OK
+
+    def Get_frameRate(self):
+        if self.b_open_device:
+            stFloatParam_frameRate = MVCC_FLOATVALUE()
+            memset(byref(stFloatParam_frameRate), 0, sizeof(MVCC_FLOATVALUE))
+            ret = self.obj_cam.MV_CC_GetFloatValue("AcquisitionFrameRate", stFloatParam_frameRate)
+            if ret != 0:
+                logger.debug("get frameRate fail! ret[0x%x]" % ret)
+                return None, ret
+            return stFloatParam_frameRate.fCurValue, MV_OK
+
+    def Set_binning_vertical(self, binning_num):
+        if self.b_open_device:
+            ret = self.obj_cam.MV_CC_SetEnumValue("BinningVertical", int(binning_num))
+            if ret != 0:
+                logger.debug("set binning vertical fail! ret[0x%x]" % ret)
+                return ret
+            return MV_OK
+
+    def Set_binning_horizontal(self, binning_num):
+        if self.b_open_device:
+            ret = self.obj_cam.MV_CC_SetEnumValue("BinningHorizontal", int(binning_num))
+            if ret != 0:
+                logger.debug("set binning horizontal fail! ret[0x%x]" % ret)
+                return ret
+            return MV_OK
